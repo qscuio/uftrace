@@ -209,6 +209,12 @@ extern struct uftrace_sym_info mcount_sym_info;
 extern struct uftrace_filter_setting mcount_filter_setting;
 extern struct uftrace_triggers_info *mcount_triggers;
 
+/* Streaming mode: print trace output in real-time */
+extern bool mcount_stream_mode;
+extern void stream_trace_entry(struct mcount_thread_data *mtdp,
+			       struct mcount_ret_stack *rstack,
+			       int type);
+
 enum mcount_global_flag {
 	MCOUNT_GFL_SETUP = (1U << 0),
 	MCOUNT_GFL_FINISH = (1U << 1),

@@ -106,6 +106,7 @@ enum uftrace_short_options {
 	OPT_mermaid,
 	OPT_library_path,
 	OPT_loc_filter,
+	OPT_stream,
 };
 
 /* clang-format off */
@@ -215,6 +216,7 @@ __used static const char uftrace_help[] =
 "      --sort-column=INDEX    Sort diff report on column INDEX (default: "
 	stringify(OPT_SORT_COLUMN) ")\n"
 "      --srcline              Enable recording source line info\n"
+"      --stream               Print trace output in real-time (live mode only)\n"
 "      --symbols              Print symbol tables\n"
 "  -s, --sort=KEY[,KEY,...]   Sort reported functions by KEYs (default: "
 	stringify(OPT_SORT_KEYS) ")\n"
@@ -347,6 +349,7 @@ static const struct option uftrace_options[] = {
 	REQ_ARG(with-syms, OPT_with_syms),
 	NO_ARG(agent, 'g'),
 	REQ_ARG(pid, 'p'),
+	NO_ARG(stream, OPT_stream),
 	{ 0 }
 };
 /* clang-format on */
@@ -1097,6 +1100,10 @@ static int parse_option(struct uftrace_opts *opts, int key, char *arg)
 
 	case OPT_mermaid:
 		opts->mermaid = true;
+		break;
+
+	case OPT_stream:
+		opts->stream = true;
 		break;
 
 	default:

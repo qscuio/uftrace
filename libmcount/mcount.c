@@ -1270,6 +1270,9 @@ void mcount_entry_filter_record(struct mcount_thread_data *mtdp, struct mcount_r
 		if (SCRIPT_ENABLED && script_str)
 			script_hook_entry(mtdp, rstack, tr);
 
+		if (mcount_stream_mode)
+			stream_trace_entry(mtdp, rstack, UFTRACE_ENTRY);
+
 #define FLAGS_TO_CHECK (TRIGGER_FL_RECOVER | TRIGGER_FL_TRACE_ON | TRIGGER_FL_TRACE_OFF)
 
 		if (tr->flags & FLAGS_TO_CHECK) {
@@ -1385,6 +1388,9 @@ void mcount_exit_filter_record(struct mcount_thread_data *mtdp, struct mcount_re
 		/* script hooking for function exit */
 		if (SCRIPT_ENABLED && script_str)
 			script_hook_exit(mtdp, rstack);
+
+		if (mcount_stream_mode)
+			stream_trace_entry(mtdp, rstack, UFTRACE_EXIT);
 	}
 }
 
@@ -1409,6 +1415,9 @@ void mcount_entry_filter_record(struct mcount_thread_data *mtdp, struct mcount_r
 				struct uftrace_trigger *tr, struct mcount_regs *regs)
 {
 	mtdp->record_idx++;
+
+	if (mcount_stream_mode)
+		stream_trace_entry(mtdp, rstack, UFTRACE_ENTRY);
 }
 
 void mcount_exit_filter_record(struct mcount_thread_data *mtdp, struct mcount_ret_stack *rstack,
@@ -1421,6 +1430,9 @@ void mcount_exit_filter_record(struct mcount_thread_data *mtdp, struct mcount_re
 		if (record_trace_data(mtdp, rstack, NULL) < 0)
 			pr_err("error during record");
 	}
+
+	if (mcount_stream_mode)
+		stream_trace_entry(mtdp, rstack, UFTRACE_EXIT);
 }
 
 static void mcount_save_filter(struct mcount_thread_data *mtdp)
@@ -2129,6 +2141,9 @@ static __used void mcount_startup(void)
 
 	if (getenv("UFTRACE_AGENT"))
 		agent_spawn();
+
+	if (getenv("UFTRACE_STREAM"))
+		mcount_stream_mode = true;
 
 	pthread_atfork(atfork_prepare_handler, NULL, atfork_child_handler);
 

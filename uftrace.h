@@ -311,6 +311,7 @@ struct uftrace_opts {
 	bool estimate_return;
 	bool mermaid;
 	bool agent;
+	bool stream;
 	struct uftrace_time_range range;
 	enum uftrace_pattern_type patt_type;
 	enum uftrace_trace_state trace;
@@ -415,6 +416,8 @@ enum uftrace_msg_type {
 	UFTRACE_MSG_DLOPEN,
 	UFTRACE_MSG_FINISH,
 
+	UFTRACE_MSG_STREAM_TRACE = 50, /* streaming trace record */
+
 	UFTRACE_MSG_SEND_START = 100,
 	UFTRACE_MSG_SEND_DIR_NAME,
 	UFTRACE_MSG_SEND_DATA,
@@ -461,6 +464,17 @@ struct uftrace_msg_dlopen {
 	int unused;
 	int namelen;
 	char exename[];
+};
+
+/* Streaming trace record - sent in real-time during tracing */
+struct uftrace_msg_stream {
+	uint64_t time;
+	uint64_t addr;
+	int32_t tid;
+	uint16_t depth;
+	uint8_t type; /* UFTRACE_ENTRY or UFTRACE_EXIT */
+	uint8_t flags;
+	uint64_t duration; /* only valid for EXIT records */
 };
 
 enum uftrace_agent_opt {

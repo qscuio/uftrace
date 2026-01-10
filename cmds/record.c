@@ -66,6 +66,81 @@ static bool has_perf_event;
 static bool has_sched_event;
 static bool finish_received;
 
+/* Streaming symbol resolution state */
+static struct uftrace_sym_info stream_sym_info;
+static int stream_pid;
+
+/**
+ * read_live_proc_maps - read memory maps from a live process
+ * @pid: process ID to read maps from
+ * @sinfo: symbol info structure to populate
+ * @exename: name of the main executable
+ *
+ * This function reads /proc/[pid]/maps and builds the memory map
+ * structure needed for symbol resolution during streaming.
+ */
+static void read_live_proc_maps(int pid, struct uftrace_sym_info *sinfo, const char *exename)
+{
+	FILE *fp;
+	char path[PATH_MAX];
+	char buf[PATH_MAX];
+	struct uftrace_mmap **maps = &sinfo->maps;
+	struct uftrace_mmap *prev_map = NULL;
+
+	snprintf(path, sizeof(path), "/proc/%d/maps", pid);
+	fp = fopen(path, "r");
+	if (fp == NULL) {
+		pr_dbg("cannot open %s\n", path);
+		return;
+	}
+
+	while (fgets(buf, sizeof(buf), fp)) {
+		unsigned long start, end;
+		char prot[5];
+		char libpath[PATH_MAX];
+		struct uftrace_mmap *map;
+		size_t namelen;
+
+		/* parse: start-end prot offset dev inode pathname */
+		if (sscanf(buf, "%lx-%lx %4s %*x %*x:%*x %*d %s",
+			   &start, &end, prot, libpath) != 4)
+			continue;
+
+		/* skip special mappings like [heap], [vdso], [stack] */
+		if (libpath[0] == '[')
+			continue;
+
+		/* skip non-file mappings */
+		if (libpath[0] != '/')
+			continue;
+
+		/* merge adjacent mappings of the same file */
+		if (prev_map && !strcmp(libpath, prev_map->libname)) {
+			prev_map->end = end;
+			continue;
+		}
+
+		namelen = ALIGN(strlen(libpath) + 1, 4);
+		map = xzalloc(sizeof(*map) + namelen);
+
+		map->start = start;
+		map->end = end;
+		map->len = namelen;
+		memcpy(map->prot, prot, 4);
+		memcpy(map->libname, libpath, strlen(libpath) + 1);
+
+		/* set mapping of main executable */
+		if (sinfo->exec_map == NULL && exename && !strcmp(libpath, exename))
+			sinfo->exec_map = map;
+
+		*maps = map;
+		maps = &map->next;
+		prev_map = map;
+	}
+
+	fclose(fp);
+}
+
 static bool can_use_fast_libmcount(struct uftrace_opts *opts)
 {
 	if (debug)
@@ -339,6 +414,9 @@ static void setup_child_environ(struct uftrace_opts *opts, int argc, char *argv[
 
 	if (opts->agent)
 		setenv("UFTRACE_AGENT", "1", 1);
+
+	if (opts->stream)
+		setenv("UFTRACE_STREAM", "1", 1);
 
 	if (argc > 0) {
 		char *args = NULL;
@@ -1091,10 +1169,12 @@ struct dlopen_list {
 
 static LIST_HEAD(dlopen_libs);
 
-static void read_record_mmap(int pfd, const char *dirname, int bufsize)
+static void read_record_mmap(int pfd, struct uftrace_opts *opts)
 {
 	char buf[128];
 	struct shmem_list *sl, *tmp;
+	char *dirname = opts->dirname;
+	int bufsize = opts->bufsize;
 	struct tid_list *tl, *pos;
 	struct uftrace_msg msg;
 	struct uftrace_msg_task tmsg;
@@ -1257,6 +1337,30 @@ static void read_record_mmap(int pfd, const char *dirname, int bufsize)
 		pr_dbg2("MSG SESSION: %d: %s (%s)\n", sess.task.tid, exename, buf);
 
 		write_session_info(dirname, &sess, exename);
+
+		/* Initialize streaming symbol resolution */
+		if (opts->stream && !stream_sym_info.loaded) {
+			stream_pid = sess.task.pid;
+			stream_sym_info.dirname = opts->dirname;
+			stream_sym_info.symdir = opts->with_syms ?: opts->dirname;
+			stream_sym_info.filename = xstrdup(exename);
+			stream_sym_info.flags = SYMTAB_FL_DEMANGLE | SYMTAB_FL_ADJ_OFFSET;
+			/* Set to max value to disable kernel address detection */
+			stream_sym_info.kernel_base = -1ULL;
+
+			/* Read live memory maps from the traced process */
+			read_live_proc_maps(stream_pid, &stream_sym_info, exename);
+
+			/* Load symbols from actual binaries (not .sym files) */
+			if (stream_sym_info.maps) {
+				load_module_symtabs(&stream_sym_info);
+				stream_sym_info.loaded = true;
+				pr_dbg("Streaming symbol resolution initialized\n");
+			} else {
+				pr_dbg("Failed to load maps - symbol resolution disabled\n");
+			}
+		}
+
 		free(exename);
 		break;
 
@@ -1289,6 +1393,7 @@ static void read_record_mmap(int pfd, const char *dirname, int bufsize)
 		list_add_tail(&dlib->list, &dlopen_libs);
 
 		write_dlopen_info(dirname, &dmsg, exename);
+
 		/* exename will be freed with the dlib */
 		break;
 
@@ -1296,6 +1401,45 @@ static void read_record_mmap(int pfd, const char *dirname, int bufsize)
 		pr_dbg2("MSG FINISH\n");
 		finish_received = true;
 		break;
+
+	case UFTRACE_MSG_STREAM_TRACE: {
+		struct uftrace_msg_stream stream;
+		struct uftrace_symbol *sym;
+		char *name;
+
+		if (msg.len != sizeof(stream))
+			pr_err_ns("invalid stream message length\n");
+
+		if (read_all(pfd, &stream, sizeof(stream)) < 0)
+			pr_err("reading pipe failed");
+
+		/* Resolve symbol name from address */
+		sym = find_symtabs(&stream_sym_info, stream.addr);
+		name = symbol_getname(sym, stream.addr);
+
+		/* Print streaming trace output to console */
+		if (stream.type == UFTRACE_ENTRY) {
+			pr_out("%*s[%5d] %*s%s() {\n",
+			       10, "", stream.tid,
+			       stream.depth * 2, "",
+			       name ? name : "???");
+		}
+		else {
+			char duration_buf[32] = "";
+			if (stream.duration > 0) {
+				double dur_usec = stream.duration / 1000.0;
+				snprintf(duration_buf, sizeof(duration_buf),
+					 "%7.3f us", dur_usec);
+			}
+			pr_out("%10s [%5d] %*s} /* %s */\n",
+			       duration_buf, stream.tid,
+			       stream.depth * 2, "",
+			       name ? name : "???");
+		}
+		symbol_putname(sym, name);
+		fflush(stdout);
+		break;
+	}
 
 	default:
 		pr_warn("Unknown message type: %u\n", msg.type);
@@ -1907,7 +2051,7 @@ static int stop_tracing(struct writer_data *wd, struct uftrace_opts *opts)
 			break;
 
 		if (remaining) {
-			read_record_mmap(wd->pipefd, opts->dirname, opts->bufsize);
+			read_record_mmap(wd->pipefd, opts);
 			continue;
 		}
 
@@ -2138,7 +2282,7 @@ static int do_main_loop(int ready[], struct uftrace_opts *opts, int pid)
 			pr_err("error during poll");
 
 		if (pollfd.revents & POLLIN)
-			read_record_mmap(wd.pipefd, opts->dirname, opts->bufsize);
+			read_record_mmap(wd.pipefd, opts);
 
 		if (pollfd.revents & (POLLERR | POLLHUP))
 			break;
