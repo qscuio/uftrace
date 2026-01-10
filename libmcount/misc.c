@@ -10,6 +10,7 @@
 
 #include "libmcount/internal.h"
 #include "libmcount/mcount.h"
+#include <errno.h>
 #include "utils/tracefs.h"
 #include "utils/utils.h"
 
@@ -81,9 +82,27 @@ void uftrace_send_message(int type, void *data, size_t len)
 
 	len += sizeof(msg);
 	if (writev(mcount_pfd, iov, 2) != (ssize_t)len) {
+		if (mcount_attached_mode &&
+		    (errno == EPIPE || errno == EAGAIN || errno == ENXIO)) {
+			mcount_handle_stream_error();
+			return;
+		}
 		if (!mcount_should_stop())
 			pr_err("send msg (type %d) failed", type);
 	}
+}
+
+void mcount_handle_stream_error(void)
+{
+	if (!mcount_attached_mode)
+		return;
+
+	if (mcount_pfd >= 0) {
+		close(mcount_pfd);
+		mcount_pfd = -1;
+	}
+
+	mcount_stream_mode = false;
 }
 
 void build_debug_domain(char *dbg_domain_str)

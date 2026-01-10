@@ -13,6 +13,7 @@
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 /* This should be defined before #include "utils.h" */
@@ -1074,6 +1075,41 @@ static void load_module_symbol(struct uftrace_sym_info *sinfo, struct uftrace_mo
 {
 	unsigned flags = sinfo->flags;
 	struct uftrace_symtab dsymtab = {};
+	struct stat st;
+
+	if ((flags & SYMTAB_FL_USE_SYMFILE) && sinfo->symdir && sinfo->symdir[0] &&
+	    stat(sinfo->symdir, &st) == 0 && S_ISREG(st.st_mode)) {
+		char cand_build_id[BUILD_ID_STR_SIZE] = "";
+		bool match = false;
+
+		if (access(sinfo->symdir, R_OK) == 0) {
+			if (m->build_id[0]) {
+				if (read_build_id(sinfo->symdir, cand_build_id,
+						  sizeof(cand_build_id)) == 0 &&
+				    cand_build_id[0] &&
+				    strcmp(cand_build_id, m->build_id) == 0) {
+					match = true;
+				}
+			}
+			else if (sinfo->filename && !strcmp(m->name, sinfo->filename)) {
+				match = true;
+			}
+			else if (!strcmp(uftrace_basename(sinfo->symdir),
+					 uftrace_basename(m->name))) {
+				match = true;
+			}
+		}
+
+		if (match) {
+			load_symtab(&m->symtab, sinfo->symdir, 0, flags);
+			load_dynsymtab(&dsymtab, sinfo->symdir, 0, flags);
+			merge_symtabs(&m->symtab, &dsymtab);
+			update_symtab_using_dynsym(&m->symtab, sinfo->symdir, 0, flags);
+			if (m->symtab.nr_sym)
+				return;
+			unload_symtab(&m->symtab);
+		}
+	}
 
 	if (flags & SYMTAB_FL_USE_SYMFILE) {
 		char *symfile = NULL;

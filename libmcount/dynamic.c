@@ -32,6 +32,7 @@
 #include "utils/utils.h"
 
 static struct mcount_dynamic_info *mdinfo;
+bool mcount_dynamic_force_pg;
 static struct mcount_dynamic_stats {
 	int total;
 	int failed;
@@ -300,6 +301,11 @@ struct mcount_dynamic_info *setup_trampoline(struct uftrace_mmap *map)
 	}
 
 	if (mdi != NULL && mdi->trampoline == 0) {
+		if (mcount_dynamic_force_pg && mdi->type == DYNAMIC_PG) {
+			pr_dbg("force dynamic patching for instrumented module: %s\n",
+			       uftrace_basename(mdi->map->libname));
+			mdi->type = DYNAMIC_NONE;
+		}
 		if (mcount_arch_ops.setup_trampoline(mdi) < 0)
 			mdi = NULL;
 	}

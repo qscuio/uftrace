@@ -1,4 +1,5 @@
 #include <dlfcn.h>
+#include <elf.h>
 #include <errno.h>
 #include <fnmatch.h>
 #include <link.h>
@@ -106,6 +107,232 @@ extern void uftrace___cyg_profile_func_enter(void *, void *);
 extern void uftrace___cyg_profile_func_exit(void *, void *);
 
 #define CYGPROF_PREFIX "__cyg_profile_func_"
+
+static bool get_trace_rebind_target(const char *name, unsigned long *target)
+{
+	if (!strcmp(name, "mcount") || !strcmp(name, "_mcount") || !strcmp(name, "__gnu_mcount_nc")) {
+		*target = mcount_arch_ops.entry[UFT_ARCH_OPS_MCOUNT];
+		return true;
+	}
+
+	if (!strcmp(name, "__fentry__")) {
+		*target = mcount_arch_ops.entry[UFT_ARCH_OPS_FENTRY];
+		return true;
+	}
+
+	if (!strcmp(name, CYGPROF_PREFIX "enter")) {
+		*target = (unsigned long)uftrace___cyg_profile_func_enter;
+		return true;
+	}
+
+	if (!strcmp(name, CYGPROF_PREFIX "exit")) {
+		*target = (unsigned long)uftrace___cyg_profile_func_exit;
+		return true;
+	}
+
+	return false;
+}
+
+struct rebind_base_info {
+	const char *exename;
+	unsigned long base;
+	bool found;
+};
+
+static int find_main_base_cb(struct dl_phdr_info *info, size_t size, void *data)
+{
+	struct rebind_base_info *base = data;
+
+	if (info->dlpi_name[0] == '\0' ||
+	    mcount_is_main_executable(info->dlpi_name, base->exename)) {
+		base->base = info->dlpi_addr;
+		base->found = true;
+		return 1;
+	}
+
+	return 0;
+}
+
+static bool find_main_load_bias(const char *exename, unsigned long *base)
+{
+	struct rebind_base_info info = {
+		.exename = exename,
+	};
+
+	dl_iterate_phdr(find_main_base_cb, &info);
+	if (!info.found)
+		return false;
+
+	*base = info.base;
+	return true;
+}
+
+static unsigned long calc_load_bias(struct uftrace_elf_data *elf, unsigned long map_start)
+{
+	struct uftrace_elf_iter iter;
+	unsigned long min_vaddr = ~0UL;
+
+	elf_for_each_phdr(elf, &iter) {
+		if (iter.phdr.p_type != PT_LOAD)
+			continue;
+		if (iter.phdr.p_vaddr < min_vaddr)
+			min_vaddr = iter.phdr.p_vaddr;
+	}
+
+	if (min_vaddr == ~0UL)
+		return map_start;
+
+	return map_start - min_vaddr;
+}
+
+static void relro_mprotect(struct uftrace_elf_data *elf, unsigned long load_bias, int prot,
+			   unsigned long *relro_start, unsigned long *relro_size)
+{
+	struct uftrace_elf_iter iter;
+	unsigned long page_size = getpagesize();
+
+	*relro_start = 0;
+	*relro_size = 0;
+
+	elf_for_each_phdr(elf, &iter) {
+		if (iter.phdr.p_type != PT_GNU_RELRO)
+			continue;
+
+		*relro_start = iter.phdr.p_vaddr + load_bias;
+		*relro_start &= ~(page_size - 1);
+		*relro_size = (iter.phdr.p_memsz + page_size - 1) & ~(page_size - 1);
+
+		mprotect((void *)*relro_start, *relro_size, prot);
+		break;
+	}
+}
+
+static int rebind_trace_rela(struct uftrace_elf_data *elf, struct uftrace_elf_iter *rel_iter,
+			     struct uftrace_elf_iter *sym_iter, unsigned long load_bias)
+{
+	int patched = 0;
+
+	elf_for_each_rela(elf, rel_iter) {
+		unsigned long target;
+		unsigned long *addr;
+		int symidx;
+		char *name;
+
+		symidx = elf_rel_symbol(&rel_iter->rela);
+		if (symidx == 0)
+			continue;
+
+		elf_get_symbol(elf, sym_iter, symidx);
+		if (sym_iter->sym.st_shndx != STN_UNDEF)
+			continue;
+
+		name = elf_get_name(elf, sym_iter, sym_iter->sym.st_name);
+		if (!get_trace_rebind_target(name, &target))
+			continue;
+
+		addr = (unsigned long *)(rel_iter->rela.r_offset + load_bias);
+		*addr = target;
+		patched++;
+		pr_dbg2("rebind %s -> %p\n", name, (void *)target);
+	}
+
+	return patched;
+}
+
+static int rebind_trace_rel(struct uftrace_elf_data *elf, struct uftrace_elf_iter *rel_iter,
+			    struct uftrace_elf_iter *sym_iter, unsigned long load_bias)
+{
+	int patched = 0;
+
+	elf_for_each_rel(elf, rel_iter) {
+		unsigned long target;
+		unsigned long *addr;
+		int symidx;
+		char *name;
+
+		symidx = elf_rel_symbol(&rel_iter->rel);
+		if (symidx == 0)
+			continue;
+
+		elf_get_symbol(elf, sym_iter, symidx);
+		if (sym_iter->sym.st_shndx != STN_UNDEF)
+			continue;
+
+		name = elf_get_name(elf, sym_iter, sym_iter->sym.st_name);
+		if (!get_trace_rebind_target(name, &target))
+			continue;
+
+		addr = (unsigned long *)(rel_iter->rel.r_offset + load_bias);
+		*addr = target;
+		patched++;
+		pr_dbg2("rebind %s -> %p\n", name, (void *)target);
+	}
+
+	return patched;
+}
+
+int mcount_rebind_trace_syms(const char *exename, unsigned long map_start)
+{
+	struct uftrace_elf_data elf;
+	struct uftrace_elf_iter sec_iter;
+	struct uftrace_elf_iter rel_iter;
+	struct uftrace_elf_iter sym_iter = {};
+	unsigned long load_bias;
+	unsigned long relro_start = 0;
+	unsigned long relro_size = 0;
+	bool has_dynsym = false;
+	int patched = 0;
+
+	if (exename == NULL)
+		return 0;
+
+	if (elf_init(exename, &elf) < 0)
+		return 0;
+
+	if (!find_main_load_bias(exename, &load_bias)) {
+		if (map_start == 0)
+			load_bias = 0;
+		else
+			load_bias = calc_load_bias(&elf, map_start);
+	}
+
+	elf_for_each_shdr(&elf, &sec_iter) {
+		if (sec_iter.shdr.sh_type == SHT_DYNSYM) {
+			memcpy(&sym_iter, &sec_iter, sizeof(sec_iter));
+			elf_get_strtab(&elf, &sym_iter, sec_iter.shdr.sh_link);
+			elf_get_secdata(&elf, &sym_iter);
+			has_dynsym = true;
+			break;
+		}
+	}
+
+	if (!has_dynsym) {
+		elf_finish(&elf);
+		return 0;
+	}
+
+	relro_mprotect(&elf, load_bias, PROT_READ | PROT_WRITE, &relro_start, &relro_size);
+
+	elf_for_each_shdr(&elf, &sec_iter) {
+		if (sec_iter.shdr.sh_type == SHT_RELA) {
+			memcpy(&rel_iter, &sec_iter, sizeof(sec_iter));
+			patched += rebind_trace_rela(&elf, &rel_iter, &sym_iter, load_bias);
+		}
+		else if (sec_iter.shdr.sh_type == SHT_REL) {
+			memcpy(&rel_iter, &sec_iter, sizeof(sec_iter));
+			patched += rebind_trace_rel(&elf, &rel_iter, &sym_iter, load_bias);
+		}
+	}
+
+	if (relro_size)
+		mprotect((void *)relro_start, relro_size, PROT_READ);
+
+	if (patched == 0)
+		pr_dbg2("no trace symbols rebound in %s\n", exename);
+
+	elf_finish(&elf);
+	return patched;
+}
 
 /*
  * Some compilers generate PLT section even if -fno-plt option is given.

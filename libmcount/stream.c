@@ -6,6 +6,7 @@
  * Released under the GPL v2.
  */
 
+#include <errno.h>
 #include <stdio.h>
 #include <sys/uio.h>
 #include <unistd.h>
@@ -20,6 +21,9 @@
 
 /* Global flag to enable streaming mode */
 bool mcount_stream_mode = false;
+
+/* Global flag for attached mode (injected into running process) */
+bool mcount_attached_mode = false;
 
 /*
  * stream_trace_entry - send a streaming trace record to uftrace
@@ -52,6 +56,11 @@ void stream_trace_entry(struct mcount_thread_data *mtdp,
 	};
 	ssize_t len;
 
+	if (mcount_pfd < 0) {
+		if (mcount_attached_mode)
+			mcount_try_open_attached_fifo();
+	}
+
 	if (mcount_pfd < 0)
 		return;
 
@@ -69,6 +78,11 @@ void stream_trace_entry(struct mcount_thread_data *mtdp,
 
 	len = sizeof(hdr) + sizeof(msg);
 	if (writev(mcount_pfd, iov, 2) != len) {
+		if (mcount_attached_mode &&
+		    (errno == EPIPE || errno == EAGAIN || errno == ENXIO)) {
+			mcount_handle_stream_error();
+			return;
+		}
 		if (!mcount_should_stop())
 			pr_dbg("failed to send stream trace record\n");
 	}

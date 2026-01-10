@@ -215,6 +215,13 @@ extern void stream_trace_entry(struct mcount_thread_data *mtdp,
 			       struct mcount_ret_stack *rstack,
 			       int type);
 
+/* Attached mode: libmcount was injected into a running process */
+extern bool mcount_attached_mode;
+/* Allow dynamic patching for instrumented binaries when attach rebinding fails. */
+extern bool mcount_dynamic_force_pg;
+extern void mcount_try_open_attached_fifo(void);
+extern void mcount_handle_stream_error(void);
+
 enum mcount_global_flag {
 	MCOUNT_GFL_SETUP = (1U << 0),
 	MCOUNT_GFL_FINISH = (1U << 1),
@@ -384,6 +391,7 @@ struct plthook_data {
 
 unsigned long setup_pltgot(struct plthook_data *pd, int got_idx, int sym_idx, void *data);
 extern void mcount_setup_plthook(char *exename, bool nest_libcall);
+extern int mcount_rebind_trace_syms(const char *exename, unsigned long map_start);
 
 extern void setup_dynsym_indexes(struct plthook_data *pd);
 extern void destroy_dynsym_indexes(void);
@@ -432,6 +440,7 @@ extern int record_trace_data(struct mcount_thread_data *mtdp, struct mcount_ret_
 extern struct uftrace_mmap *new_map(const char *path, uint64_t start, uint64_t end,
 				    const char *prot);
 extern void record_proc_maps(char *dirname, const char *sess_id, struct uftrace_sym_info *sinfo);
+extern void load_proc_maps_attached(struct uftrace_sym_info *sinfo);
 extern void mcount_rstack_inject_return(struct mcount_thread_data *mtdp,
 					unsigned long *frame_pointer, unsigned long addr);
 

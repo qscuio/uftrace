@@ -23,7 +23,7 @@
 	ldp	x8, x18, [sp], #16
 .endm
 
-ENTRY(plt_hooker)
+GLOBAL(plt_hooker)
 	/*
 	 * it gets called with:
 	 *  [sp, #8] :   lr

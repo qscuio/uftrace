@@ -3,6 +3,7 @@
 #include <pthread.h>
 #include <sched.h>
 #include <stdio.h>
+#include <string.h>
 #include <sys/mman.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
@@ -1184,6 +1185,115 @@ struct uftrace_mmap *new_map(const char *path, uint64_t start, uint64_t end, con
 	read_build_id(path, map->build_id, sizeof(map->build_id));
 
 	return map;
+}
+
+static bool path_matches_exename(const char *path, const char *exename)
+{
+	char buf[PATH_MAX];
+	const char *deleted;
+	size_t len;
+
+	if (!path || !exename)
+		return false;
+
+	if (!strcmp(path, exename))
+		return true;
+
+	if (mcount_is_main_executable(path, exename))
+		return true;
+
+	deleted = strstr(path, " (deleted)");
+	if (!deleted || strcmp(deleted, " (deleted)") != 0)
+		return false;
+
+	len = (size_t)(deleted - path);
+	if (len >= sizeof(buf))
+		return false;
+
+	memcpy(buf, path, len);
+	buf[len] = '\0';
+
+	if (!strcmp(buf, exename))
+		return true;
+
+	return mcount_is_main_executable(buf, exename);
+}
+
+/**
+ * load_proc_maps_attached - load proc maps without file I/O (for attached mode)
+ * @sinfo: symbol info to populate
+ *
+ * This is a simplified version of record_proc_maps that only populates
+ * the memory map information in sinfo->maps without writing to files.
+ * Used when attaching to a running process.
+ */
+void load_proc_maps_attached(struct uftrace_sym_info *sinfo)
+{
+	FILE *fp;
+	char buf[PATH_MAX];
+	struct uftrace_mmap *prev_map = NULL;
+
+	fp = fopen("/proc/self/maps", "r");
+	if (fp == NULL) {
+		pr_dbg("cannot open proc maps file\n");
+		return;
+	}
+
+	sinfo->kernel_base = -1ULL;
+
+	while (fgets(buf, sizeof(buf), fp)) {
+		unsigned long start, end;
+		char prot[5];
+		unsigned char major, minor;
+		uint32_t ino;
+		uint64_t off;
+		char path[PATH_MAX];
+		struct uftrace_mmap *map;
+
+		/* skip anon mappings */
+		if (sscanf(buf, "%lx-%lx %4s %" SCNx64 " %hhx:%hhx %u %s",
+			   &start, &end, prot, &off, &major, &minor, &ino, path) != 8)
+			continue;
+
+		/*
+		 * skip special mappings like [heap], [vdso] etc.
+		 * but [stack] is still needed to get kernel base address.
+		 */
+		if (path[0] == '[') {
+			if (strncmp(path, "[stack", 6) == 0)
+				sinfo->kernel_base = guess_kernel_base(buf);
+			continue;
+		}
+
+		if (prev_map != NULL) {
+			/* extend prev_map to have all segments */
+			if (!strcmp(path, prev_map->libname)) {
+				prev_map->end = end;
+				if (prot[2] == 'x')
+					mcount_memcpy1(prev_map->prot, prot, 4);
+				continue;
+			}
+		}
+
+		map = new_map(path, start, end, prot);
+
+		/* save map for the executable */
+		if (sinfo->filename && path_matches_exename(path, sinfo->filename))
+			sinfo->exec_map = map;
+
+		if (prev_map)
+			prev_map->next = map;
+		else
+			sinfo->maps = map;
+
+		map->next = NULL;
+		prev_map = map;
+	}
+
+	fclose(fp);
+
+	if (sinfo->maps == NULL)
+		pr_dbg("no maps loaded for attached mode\n");
 }
 
 void record_proc_maps(char *dirname, const char *sess_id, struct uftrace_sym_info *sinfo)

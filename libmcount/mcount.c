@@ -1992,6 +1992,206 @@ static void mcount_script_init(enum uftrace_pattern_type patt_type)
 	strv_free(&info.cmds);
 }
 
+static void mcount_attached_signal_handler(int sig)
+{
+	if (!mcount_attached_mode)
+		return;
+
+	if (sig == SIGUSR1) {
+		mcount_enabled = true;
+		mcount_stream_mode = true;
+	}
+	else if (sig == SIGUSR2) {
+		mcount_enabled = false;
+		mcount_stream_mode = false;
+		if (mcount_pfd >= 0) {
+			close(mcount_pfd);
+			mcount_pfd = -1;
+		}
+	}
+}
+
+static void mcount_setup_attached_signals(void)
+{
+	struct sigaction sa = {
+		.sa_handler = mcount_attached_signal_handler,
+		.sa_flags = SA_RESTART,
+	};
+
+	sigemptyset(&sa.sa_mask);
+	sigaction(SIGUSR1, &sa, NULL);
+	sigaction(SIGUSR2, &sa, NULL);
+}
+
+static char attach_fifo_path[PATH_MAX];
+#define ATTACH_CFG_FMT "/tmp/uftrace-attach/%d.cfg"
+
+static void set_attach_fifo_path(const char *dirname)
+{
+	const char *env_path = getenv("UFTRACE_ATTACH_SOCKET");
+
+	if (env_path && *env_path) {
+		strncpy(attach_fifo_path, env_path, sizeof(attach_fifo_path) - 1);
+		attach_fifo_path[sizeof(attach_fifo_path) - 1] = '\0';
+		return;
+	}
+
+	snprintf(attach_fifo_path, sizeof(attach_fifo_path), "%s/%d.sock", dirname, getpid());
+}
+
+static void try_open_attach_fifo(void)
+{
+	int fd;
+
+	if (mcount_pfd >= 0)
+		return;
+	if (!attach_fifo_path[0])
+		return;
+
+	fd = open(attach_fifo_path, O_RDWR | O_NONBLOCK);
+	if (fd < 0) {
+		pr_dbg("failed to open attach FIFO %s: %s\n", attach_fifo_path, strerror(errno));
+		return;
+	}
+
+	mcount_pfd = fd;
+}
+
+static bool attach_fifo_exists(const char *dirname)
+{
+	char path[PATH_MAX];
+
+	snprintf(path, sizeof(path), "%s/%d.sock", dirname, getpid());
+	return access(path, F_OK) == 0;
+}
+
+static const char *get_attach_cfg_symdir(char *buf, size_t buflen)
+{
+	char path[PATH_MAX];
+	char line[PATH_MAX + 32];
+	FILE *fp;
+
+	snprintf(path, sizeof(path), ATTACH_CFG_FMT, getpid());
+	fp = fopen(path, "r");
+	if (fp == NULL)
+		return NULL;
+
+	while (fgets(line, sizeof(line), fp)) {
+		char *eq;
+		char *val;
+
+		eq = strchr(line, '=');
+		if (!eq)
+			continue;
+
+		*eq = '\0';
+		if (strcmp(line, "UFTRACE_SYMBOL_DIR") != 0)
+			continue;
+
+		val = eq + 1;
+		val[strcspn(val, "\r\n")] = '\0';
+		if (!*val)
+			break;
+
+		strncpy(buf, val, buflen - 1);
+		buf[buflen - 1] = '\0';
+		fclose(fp);
+		return buf;
+	}
+
+	fclose(fp);
+	return NULL;
+}
+
+void mcount_try_open_attached_fifo(void)
+{
+	if (!mcount_attached_mode || mcount_pfd >= 0)
+		return;
+
+	try_open_attach_fifo();
+}
+
+static void *mcount_attached_init_thread(void *arg)
+{
+	char *patch_str = getenv("UFTRACE_PATCH");
+	char *pattern_str = getenv("UFTRACE_PATTERN");
+	char *maxstack_str = getenv("UFTRACE_MAX_STACK");
+	char *threshold_str = getenv("UFTRACE_THRESHOLD");
+	char *minsize_str = getenv("UFTRACE_MIN_SIZE");
+	enum uftrace_trace_type trace_type;
+
+	(void)arg;
+
+	mcount_dynamic_force_pg = false;
+
+	load_proc_maps_attached(&mcount_sym_info);
+
+	load_module_symtabs(&mcount_sym_info);
+
+	if (pattern_str)
+		mcount_filter_setting.ptype = parse_filter_pattern(pattern_str);
+
+	mcount_filter_init(&mcount_filter_setting, true);
+	mcount_watch_init();
+
+	if (maxstack_str)
+		mcount_rstack_max = strtol(maxstack_str, NULL, 0);
+
+	if (threshold_str)
+		mcount_threshold = strtoull(threshold_str, NULL, 0);
+
+	if (minsize_str)
+		mcount_min_size = strtoul(minsize_str, NULL, 0);
+
+	trace_type = check_trace_functions(mcount_exename);
+	if (trace_type == TRACE_MCOUNT || trace_type == TRACE_FENTRY ||
+	    trace_type == TRACE_CYGPROF) {
+		pr_dbg("attached mode: rebinding trace functions for instrumented binary\n");
+		/* Enable frame pointer heuristics for return tracking in attached mode */
+		// TESTING: mcount_estimate_return = true;
+		mcount_setup_plthook(mcount_exename, false);
+		if (mcount_sym_info.exec_map) {
+			int rebound = mcount_rebind_trace_syms(mcount_exename,
+							       mcount_sym_info.exec_map->start);
+
+			if (rebound > 0)
+				return NULL;
+			mcount_dynamic_force_pg = true;
+		}
+		else {
+			return NULL;
+		}
+
+		pr_dbg("attached mode: trace rebind failed, falling back to dynamic patching\n");
+	}
+
+	if (mcount_sym_info.exec_map == NULL || mcount_sym_info.exec_map->mod == NULL) {
+		pr_warn("attached mode: executable symtab not found, skip dynamic patching\n");
+		return NULL;
+	}
+
+	if (patch_str == NULL)
+		patch_str = ".";  /* Regex for all functions */
+
+	mcount_return_fn = mcount_arch_ops.exit[UFT_ARCH_OPS_DYNAMIC];
+	mcount_dynamic_update(&mcount_sym_info, patch_str, mcount_filter_setting.ptype);
+
+	pr_dbg("attached mode: dynamic patching enabled\n");
+	return NULL;
+}
+
+static void start_attached_init_thread(void)
+{
+	pthread_t tid;
+
+	if (pthread_create(&tid, NULL, mcount_attached_init_thread, NULL) != 0) {
+		pr_warn("failed to start attached init thread\n");
+		return;
+	}
+
+	pthread_detach(tid);
+}
+
 static __used void mcount_startup(void)
 {
 	char *channel = NULL;
@@ -2071,13 +2271,64 @@ static __used void mcount_startup(void)
 
 	pr_dbg("initializing mcount library\n");
 
+	/*
+	 * Detect attached mode:
+	 * - If UFTRACE_DIR is not set AND the default channel file doesn't exist,
+	 *   then we were likely injected into an already running process.
+	 * - Environment variables don't work for detection because setenv() in
+	 *   the injector process doesn't affect the target.
+	 */
 	dirname = getenv("UFTRACE_DIR");
 	if (dirname == NULL)
 		dirname = UFTRACE_DIR_NAME;
 
 	xasprintf(&channel, "%s/%s", dirname, ".channel");
 	mcount_pfd = open(channel, O_WRONLY);
-	free(channel);
+
+	if (attach_fifo_exists("/tmp/uftrace-attach")) {
+		if (mcount_pfd >= 0) {
+			close(mcount_pfd);
+			mcount_pfd = -1;
+		}
+		mcount_attached_mode = true;
+		mcount_stream_mode = true;
+		pr_dbg("detected attached mode (attach FIFO)\n");
+
+		free(channel);
+		channel = NULL;
+
+		dirname = "/tmp/uftrace-attach";
+		set_attach_fifo_path(dirname);
+		try_open_attach_fifo();
+	}
+	else if (mcount_pfd < 0 && !getenv("UFTRACE_DIR")) {
+		/* No channel file and no UFTRACE_DIR - likely attached mode */
+		mcount_attached_mode = true;
+		mcount_stream_mode = true;
+		pr_dbg("detected attached mode (no channel file)\n");
+
+		free(channel);
+		channel = NULL;
+		
+		/* Use /tmp/uftrace-attach as the base directory */
+		dirname = "/tmp/uftrace-attach";
+		
+		/* Non-blocking open prevents constructor stalls if reader is missing. */
+		set_attach_fifo_path(dirname);
+		try_open_attach_fifo();
+	}
+	else {
+		free(channel);
+	}
+
+	if (mcount_attached_mode && symdir_str == NULL) {
+		static char attach_symdir[PATH_MAX];
+		const char *cfg_symdir;
+
+		cfg_symdir = get_attach_cfg_symdir(attach_symdir, sizeof(attach_symdir));
+		if (cfg_symdir)
+			symdir_str = (char *)cfg_symdir;
+	}
 
 	if (getenv("UFTRACE_LIST_EVENT")) {
 		mcount_list_events();
@@ -2095,32 +2346,46 @@ static __used void mcount_startup(void)
 	if (symdir_str)
 		mcount_sym_info.flags |= SYMTAB_FL_USE_SYMFILE | SYMTAB_FL_SYMS_DIR;
 
-	record_proc_maps(dirname, mcount_session_name(), &mcount_sym_info);
-
-	if (pattern_str)
-		mcount_filter_setting.ptype = parse_filter_pattern(pattern_str);
-
-	if (patch_str)
-		mcount_return_fn = mcount_arch_ops.exit[UFT_ARCH_OPS_DYNAMIC];
-	else
+	if (mcount_attached_mode) {
+		/* Use mcount return until attached mode decides dynamic/PLT path. */
 		mcount_return_fn = mcount_arch_ops.exit[UFT_ARCH_OPS_MCOUNT];
+		plthook_return_fn = mcount_arch_ops.exit[UFT_ARCH_OPS_PLTHOOK];
 
-	plthook_return_fn = mcount_arch_ops.exit[UFT_ARCH_OPS_PLTHOOK];
+		/*
+		 * Initialize basic triggers to prevent NULL pointer crash
+		 * when mcount functions are called before the init thread completes.
+		 */
+		mcount_triggers = xzalloc(sizeof(*mcount_triggers));
+		mcount_triggers->root = RB_ROOT;
+	}
+	else {
+		record_proc_maps(dirname, mcount_session_name(), &mcount_sym_info);
 
-	mcount_filter_init(&mcount_filter_setting, !!patch_str);
-	mcount_watch_init();
+		if (pattern_str)
+			mcount_filter_setting.ptype = parse_filter_pattern(pattern_str);
 
-	if (maxstack_str)
-		mcount_rstack_max = strtol(maxstack_str, NULL, 0);
+		if (patch_str)
+			mcount_return_fn = mcount_arch_ops.exit[UFT_ARCH_OPS_DYNAMIC];
+		else
+			mcount_return_fn = mcount_arch_ops.exit[UFT_ARCH_OPS_MCOUNT];
 
-	if (threshold_str)
-		mcount_threshold = strtoull(threshold_str, NULL, 0);
+		plthook_return_fn = mcount_arch_ops.exit[UFT_ARCH_OPS_PLTHOOK];
 
-	if (minsize_str)
-		mcount_min_size = strtoul(minsize_str, NULL, 0);
+		mcount_filter_init(&mcount_filter_setting, !!patch_str);
+		mcount_watch_init();
 
-	if (patch_str)
-		mcount_dynamic_update(&mcount_sym_info, patch_str, mcount_filter_setting.ptype);
+		if (maxstack_str)
+			mcount_rstack_max = strtol(maxstack_str, NULL, 0);
+
+		if (threshold_str)
+			mcount_threshold = strtoull(threshold_str, NULL, 0);
+
+		if (minsize_str)
+			mcount_min_size = strtoul(minsize_str, NULL, 0);
+
+		if (patch_str)
+			mcount_dynamic_update(&mcount_sym_info, patch_str, mcount_filter_setting.ptype);
+	}
 
 	if (event_str)
 		mcount_setup_events(dirname, event_str, mcount_filter_setting.ptype);
@@ -2131,8 +2396,9 @@ static __used void mcount_startup(void)
 	if (getenv("UFTRACE_ESTIMATE_RETURN"))
 		mcount_estimate_return = true;
 
-	if (plthook_str) {
+	if (plthook_str && !mcount_attached_mode) {
 		/* PLT hook depends on mcount_estimate_return */
+		/* Skip PLT hooking in attached mode - GOT entries already resolved */
 		mcount_setup_plthook(mcount_exename, nest_libcall);
 	}
 
@@ -2142,7 +2408,7 @@ static __used void mcount_startup(void)
 	if (getenv("UFTRACE_AGENT"))
 		agent_spawn();
 
-	if (getenv("UFTRACE_STREAM"))
+	if (getenv("UFTRACE_STREAM") || mcount_attached_mode)
 		mcount_stream_mode = true;
 
 	pthread_atfork(atfork_prepare_handler, NULL, atfork_child_handler);
@@ -2152,6 +2418,12 @@ static __used void mcount_startup(void)
 	/* initialize script binding */
 	if (SCRIPT_ENABLED && script_str)
 		mcount_script_init(mcount_filter_setting.ptype);
+
+	if (mcount_attached_mode)
+		start_attached_init_thread();
+
+	if (mcount_attached_mode)
+		mcount_setup_attached_signals();
 
 	compiler_barrier();
 	pr_dbg("mcount setup done\n");

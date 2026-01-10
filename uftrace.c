@@ -106,7 +106,6 @@ enum uftrace_short_options {
 	OPT_mermaid,
 	OPT_library_path,
 	OPT_loc_filter,
-	OPT_stream,
 };
 
 /* clang-format off */
@@ -349,7 +348,6 @@ static const struct option uftrace_options[] = {
 	REQ_ARG(with-syms, OPT_with_syms),
 	NO_ARG(agent, 'g'),
 	REQ_ARG(pid, 'p'),
-	NO_ARG(stream, OPT_stream),
 	{ 0 }
 };
 /* clang-format on */
@@ -1102,10 +1100,6 @@ static int parse_option(struct uftrace_opts *opts, int key, char *arg)
 		opts->mermaid = true;
 		break;
 
-	case OPT_stream:
-		opts->stream = true;
-		break;
-
 	default:
 		return -1;
 	}
@@ -1134,6 +1128,10 @@ static void update_subcmd(struct uftrace_opts *opts, char *cmd)
 		opts->mode = UFTRACE_MODE_SCRIPT;
 	else if (!strcmp(cmd, "tui"))
 		opts->mode = UFTRACE_MODE_TUI;
+	else if (!strcmp(cmd, "attach"))
+		opts->mode = UFTRACE_MODE_ATTACH;
+	else if (!strcmp(cmd, "stream"))
+		opts->mode = UFTRACE_MODE_STREAM;
 	else
 		opts->mode = UFTRACE_MODE_INVALID;
 }
@@ -1582,6 +1580,12 @@ int main(int argc, char *argv[])
 		break;
 	case UFTRACE_MODE_TUI:
 		ret = command_tui(argc, argv, &opts);
+		break;
+	case UFTRACE_MODE_ATTACH:
+		ret = command_attach(argc, argv, &opts);
+		break;
+	case UFTRACE_MODE_STREAM:
+		ret = command_stream(argc, argv, &opts);
 		break;
 	case UFTRACE_MODE_INVALID:
 		ret = 1;
