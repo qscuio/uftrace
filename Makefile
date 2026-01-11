@@ -261,7 +261,10 @@ CFLAGS_$(objdir)/utils/demangle.op = -Wno-unused-value
 MAKEFLAGS += --no-print-directory
 
 
-all: $(objdir)/.config $(TARGETS)
+all: $(objdir)/.config $(TARGETS) plugins
+
+plugins:
+	@$(MAKE) -C $(srcdir)/plugins
 
 $(objdir)/.config: $(srcdir)/configure $(srcdir)/check-deps/Makefile
 	$(error Please run 'configure' first)
@@ -453,6 +456,7 @@ clean:
 	@$(MAKE) -sC $(srcdir)/arch/$(ARCH) clean
 	@$(MAKE) -sC $(srcdir)/tests ARCH=$(ARCH) clean
 	@$(MAKE) -sC $(docdir) clean
+	@$(MAKE) -sC $(srcdir)/plugins clean
 
 reset-coverage:
 	$(Q)find -name "*\.gcda" | xargs $(RM)
@@ -494,4 +498,4 @@ help:
 $(C_STR_OBJS): $(objdir)/%.$(C_STR_EXTENSION): $(srcdir)/%
 	$(QUIET_GEN)sed -e 's#\\#\\\\#g;s#\"#\\"#g;s#$$#\\n\"#;s#^#\"#' $< > $@
 
-.PHONY: all config clean test dist doc ctags help PHONY
+.PHONY: all config clean test dist doc ctags help plugins PHONY
