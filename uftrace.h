@@ -225,6 +225,7 @@ bool data_is_lp64(struct uftrace_data *handle);
 #define UFTRACE_MODE_TUI 10
 #define UFTRACE_MODE_ATTACH 11
 #define UFTRACE_MODE_STREAM 12
+#define UFTRACE_MODE_INJECT 13
 
 #define UFTRACE_MODE_DEFAULT UFTRACE_MODE_LIVE
 
@@ -340,6 +341,7 @@ int command_script(int argc, char *argv[], struct uftrace_opts *opts);
 int command_tui(int argc, char *argv[], struct uftrace_opts *opts);
 int command_attach(int argc, char *argv[], struct uftrace_opts *opts);
 int command_stream(int argc, char *argv[], struct uftrace_opts *opts);
+int command_inject(int argc, char *argv[], struct uftrace_opts *opts);
 
 extern volatile bool uftrace_done;
 

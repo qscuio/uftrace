@@ -1132,6 +1132,8 @@ static void update_subcmd(struct uftrace_opts *opts, char *cmd)
 		opts->mode = UFTRACE_MODE_ATTACH;
 	else if (!strcmp(cmd, "stream"))
 		opts->mode = UFTRACE_MODE_STREAM;
+	else if (!strcmp(cmd, "inject"))
+		opts->mode = UFTRACE_MODE_INJECT;
 	else
 		opts->mode = UFTRACE_MODE_INVALID;
 }
@@ -1586,6 +1588,9 @@ int main(int argc, char *argv[])
 		break;
 	case UFTRACE_MODE_STREAM:
 		ret = command_stream(argc, argv, &opts);
+		break;
+	case UFTRACE_MODE_INJECT:
+		ret = command_inject(argc, argv, &opts);
 		break;
 	case UFTRACE_MODE_INVALID:
 		ret = 1;
