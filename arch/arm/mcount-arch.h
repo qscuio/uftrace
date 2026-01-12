@@ -37,6 +37,18 @@ unsigned long *mcount_arch_parent_location(struct uftrace_sym_info *symtabs,
 /* number of reserved entries in the PLTGOT table */
 #define ARCH_PLTGOT_OFFSET 3
 
-#define NOP_INSN_SIZE 4
+/* Instruction sizes */
+#define CALL_INSN_SIZE 4       /* BL instruction */
+#define NOP_INSN_SIZE 4        /* NOP instruction */
+#define CODE_SIZE 8            /* Minimum patch size (2 instructions) */
+
+/* Dynamic patching declarations */
+struct mcount_disasm_engine;
+struct mcount_dynamic_info;
+struct mcount_disasm_info;
+
+int disasm_check_insns(struct mcount_disasm_engine *disasm,
+		       struct mcount_dynamic_info *mdi,
+		       struct mcount_disasm_info *info);
 
 #endif /* MCOUNT_ARCH_H */
