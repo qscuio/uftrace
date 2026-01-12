@@ -210,6 +210,126 @@ static unsigned long get_target_offset(struct mcount_dynamic_info *mdi, unsigned
 	return offset & 0x00ffffff;
 }
 
+/*
+ * Inline 12-byte trampoline for ARM32 using absolute addressing:
+ *
+ *   LDR pc, [pc, #-4]   ; 4 bytes: E51FF004 - Load PC from next word
+ *   .word target_addr   ; 4 bytes: absolute address
+ *
+ * Total: 8 bytes minimum. For safety with padding, use 12 bytes.
+ * This allows jumping to any address without range limitations.
+ */
+#define ARM_INLINE_TRAMPOLINE_SIZE 12
+
+/*
+ * Try to patch using an inline absolute jump trampoline.
+ * This is used when the function prologue is large enough (>= 12 bytes)
+ * to contain an absolute jump without needing a separate trampoline.
+ *
+ * Returns: 1 if patching succeeded, 0 if not applicable, -1 on error.
+ */
+static int patch_inline_trampoline(struct mcount_dynamic_info *mdi,
+				   struct mcount_disasm_info *info)
+{
+	/*
+	 * ARM32 inline trampoline:
+	 *   PUSH {fp, lr}        @ Save frame pointer and link register
+	 *   LDR pc, [pc, #-4]    @ Load PC from next word
+	 *   .word __dentry__     @ Target address
+	 */
+	uint32_t push_insn = 0xe92d4800;  /* PUSH {fp, lr} */
+	uint32_t ldr_pc = 0xe51ff004;     /* LDR pc, [pc, #-4] */
+	uint32_t target_addr = (uint32_t)(uintptr_t)__dentry__;
+	void *patch_addr;
+	size_t patch_size;
+
+	/* Need at least 12 bytes for inline trampoline */
+	if (info->orig_size < ARM_INLINE_TRAMPOLINE_SIZE)
+		return 0;
+
+	patch_addr = (void *)info->addr;
+	patch_size = info->orig_size;
+
+	/* Write inline trampoline: PUSH {fp,lr}; LDR pc, [pc, #-4]; .word target */
+	memcpy(patch_addr, &push_insn, sizeof(push_insn));
+	memcpy(patch_addr + 4, &ldr_pc, sizeof(ldr_pc));
+	memcpy(patch_addr + 8, &target_addr, sizeof(target_addr));
+
+	/* Fill remaining bytes with NOPs */
+	if (patch_size > ARM_INLINE_TRAMPOLINE_SIZE) {
+		uint32_t nop = 0xe1a00000;  /* MOV r0, r0 (NOP) */
+		size_t remaining = patch_size - ARM_INLINE_TRAMPOLINE_SIZE;
+		size_t i;
+		for (i = 0; i < remaining / 4; i++)
+			memcpy(patch_addr + ARM_INLINE_TRAMPOLINE_SIZE + i * 4, &nop, 4);
+	}
+
+	/* Flush instruction cache */
+	__builtin___clear_cache(patch_addr, patch_addr + patch_size);
+
+	pr_dbg2("patched with ARM32 inline trampoline: %s (size: %zu)\n",
+		info->sym->name, patch_size);
+
+	return 1;
+}
+
+/*
+ * Scan for code caves (NOP sleds, alignment padding) within the text segment
+ * that can be used for trampoline placement.
+ *
+ * @mdi: module dynamic info
+ * @target: target function address (for range check)
+ * @min_size: minimum size needed for the trampoline
+ *
+ * Returns: address of found code cave, or 0 if not found
+ */
+static unsigned long find_code_cave(struct mcount_dynamic_info *mdi,
+				    unsigned long target, size_t min_size)
+{
+	unsigned long addr;
+	unsigned long start = mdi->text_addr;
+	unsigned long end = mdi->text_addr + mdi->text_size;
+	size_t consecutive_nops = 0;
+	unsigned long cave_start = 0;
+
+	/* ARM32 NOP instruction: MOV r0, r0 */
+	static const uint32_t arm_nop = 0xe1a00000;
+
+	pr_dbg3("scanning for code cave near %#lx (need %zu bytes)\n",
+		target, min_size);
+
+	/*
+	 * Scan from end of text segment backwards
+	 */
+	for (addr = end - 4; addr >= start && addr > end - PAGE_SIZE; addr -= 4) {
+		uint32_t insn = *(uint32_t *)addr;
+
+		if (insn == arm_nop || insn == 0) {
+			if (consecutive_nops == 0)
+				cave_start = addr;
+			consecutive_nops += 4;
+
+			if (consecutive_nops >= min_size) {
+				unsigned long cave_addr = cave_start - min_size + 4;
+
+				/* Check if within ±32MB range for BL instruction */
+				long offset = ((long)cave_addr - (long)target - 8) >> 2;
+				if (offset >= -0x800000 && offset <= 0x7fffff) {
+					pr_dbg2("found code cave at %#lx (size: %zu)\n",
+						cave_addr, consecutive_nops);
+					return cave_addr;
+				}
+			}
+		} else {
+			consecutive_nops = 0;
+		}
+	}
+
+	pr_dbg3("no suitable code cave found\n");
+	return 0;
+}
+
+
 static int patch_code(struct mcount_dynamic_info *mdi, struct uftrace_symbol *sym)
 {
 	/*
@@ -267,6 +387,18 @@ static int patch_normal_func(struct mcount_dynamic_info *mdi, struct uftrace_sym
 
 	if (disasm_check_insns(disasm, mdi, &info) < 0)
 		return INSTRUMENT_FAILED;
+
+	/*
+	 * Try inline 12-byte trampoline for large prologues.
+	 * This is more efficient as it doesn't require saving/restoring
+	 * original instructions to a separate location.
+	 */
+	if (info.orig_size >= ARM_INLINE_TRAMPOLINE_SIZE) {
+		int ret = patch_inline_trampoline(mdi, &info);
+		if (ret > 0)
+			return INSTRUMENT_SUCCESS;
+		/* Fall through to standard patching if inline trampoline failed */
+	}
 
 	save_orig_code(&info);
 

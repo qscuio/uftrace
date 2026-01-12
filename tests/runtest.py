@@ -549,7 +549,7 @@ class TestBase:
 
     def check_arch_full_dynamic_support(self):
         elf_machine = TestBase.get_elf_machine(self)
-        if elf_machine == 'x86_64' or elf_machine == 'aarch64':
+        if elf_machine == 'x86_64' or elf_machine == 'aarch64' or elf_machine == 'arm':
             return True
         return False
 

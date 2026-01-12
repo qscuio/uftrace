@@ -21,6 +21,7 @@
 #define PR_DOMAIN DBG_SYMBOL
 
 #include "uftrace.h"
+#include "utils/eh-frame.h"
 #include "utils/filter.h"
 #include "utils/rbtree.h"
 #include "utils/symbol.h"
@@ -439,6 +440,14 @@ again:
 	if (symtab->nr_sym == 0) {
 		free(symtab->sym);
 		symtab->sym = NULL;
+
+		/* Fallback: try .eh_frame for function discovery in stripped binaries */
+		pr_dbg2("no symbols found, trying .eh_frame for function discovery\n");
+		if (load_symtab_from_eh_frame(symtab, filename, offset) > 0) {
+			pr_dbg("loaded %zu functions from .eh_frame\n", symtab->nr_sym);
+			sort_symtab(symtab);
+			ret = 0;
+		}
 		goto out;
 	}
 

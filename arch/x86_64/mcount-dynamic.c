@@ -258,6 +258,134 @@ static unsigned long get_target_addr(struct mcount_dynamic_info *mdi, unsigned l
 	return mdi->trampoline - (addr + CALL_INSN_SIZE);
 }
 
+/*
+ * Inline 16-byte trampoline structure for absolute addressing:
+ *
+ *   jmp qword ptr [rip+0]   ; 6 bytes: FF 25 00 00 00 00
+ *   .quad target_addr       ; 8 bytes: absolute address
+ *   nop; nop                ; 2 bytes: padding (optional)
+ *
+ * Total: 14-16 bytes, depending on alignment requirements.
+ * This allows jumping to any address without range limitations.
+ */
+#define INLINE_TRAMPOLINE_SIZE 14
+
+/*
+ * Try to patch using an inline 16-byte absolute jump trampoline.
+ * This is used when the function prologue is large enough (>= 14-16 bytes)
+ * to contain an absolute jump without needing a separate trampoline.
+ *
+ * Returns: 1 if patching succeeded, 0 if not applicable, -1 on error.
+ */
+static int patch_inline_trampoline(struct mcount_dynamic_info *mdi,
+				   struct mcount_disasm_info *info)
+{
+	unsigned char inline_jmp[] = {
+		0xff, 0x25, 0x00, 0x00, 0x00, 0x00,  /* jmp qword ptr [rip+0] */
+	};
+	uint64_t target_addr;
+	void *patch_addr;
+	size_t patch_size;
+
+	/* Need at least 14 bytes for inline trampoline */
+	if (info->orig_size < INLINE_TRAMPOLINE_SIZE)
+		return 0;
+
+	patch_addr = (void *)info->addr;
+	patch_size = info->orig_size;
+
+	if (info->has_intel_cet) {
+		patch_addr += ENDBR_INSN_SIZE;
+		if (patch_size >= ENDBR_INSN_SIZE)
+			patch_size -= ENDBR_INSN_SIZE;
+	}
+
+	/* Target is the __dentry__ function address */
+	target_addr = (uint64_t)__dentry__;
+
+	/* Write inline trampoline: jmp [rip+0]; .quad target */
+	memcpy(patch_addr, inline_jmp, sizeof(inline_jmp));
+	memcpy(patch_addr + sizeof(inline_jmp), &target_addr, sizeof(target_addr));
+
+	/* Fill remaining bytes with NOPs */
+	if (patch_size > INLINE_TRAMPOLINE_SIZE) {
+		memset(patch_addr + INLINE_TRAMPOLINE_SIZE, 0x90,
+		       patch_size - INLINE_TRAMPOLINE_SIZE);
+	}
+
+	/* Flush instruction cache */
+	__builtin___clear_cache(patch_addr, patch_addr + patch_size);
+
+	pr_dbg2("patched with inline 16-byte trampoline: %s (size: %zu)\n",
+		info->sym->name, patch_size);
+
+	return 1;
+}
+
+/*
+ * Scan for code caves (NOP sleds, alignment padding) within the text segment
+ * that can be used for trampoline placement. Code caves are unused bytes
+ * often found:
+ *   - Between functions for alignment
+ *   - At the end of text segments (page alignment)
+ *   - In padding after short functions
+ *
+ * @mdi: module dynamic info
+ * @target: target function address (to find caves within ±2GB range)
+ * @min_size: minimum size needed for the trampoline
+ *
+ * Returns: address of found code cave, or 0 if not found
+ */
+static unsigned long find_code_cave(struct mcount_dynamic_info *mdi,
+				    unsigned long target, size_t min_size)
+{
+	unsigned long addr;
+	unsigned long start = mdi->text_addr;
+	unsigned long end = mdi->text_addr + mdi->text_size;
+	size_t consecutive_nops = 0;
+	unsigned long cave_start = 0;
+
+	/* NOP patterns to look for */
+	static const unsigned char nop1 = 0x90;           /* single-byte NOP */
+	static const unsigned char nop2[] = { 0x66, 0x90 };  /* 2-byte NOP */
+	static const unsigned char int3 = 0xcc;           /* INT3 (may indicate padding) */
+
+	pr_dbg3("scanning for code cave near %#lx (need %zu bytes)\n",
+		target, min_size);
+
+	/*
+	 * Scan from end of text segment backwards (more likely to find caves
+	 * at alignment boundaries and segment ends)
+	 */
+	for (addr = end - 1; addr >= start && addr > end - PAGE_SIZE; addr--) {
+		unsigned char byte = *(unsigned char *)addr;
+
+		if (byte == nop1 || byte == int3) {
+			if (consecutive_nops == 0)
+				cave_start = addr;
+			consecutive_nops++;
+
+			if (consecutive_nops >= min_size) {
+				unsigned long cave_addr = cave_start - min_size + 1;
+
+				/* Check if within ±2GB range for relative jump */
+				long offset = (long)cave_addr - (long)target;
+				if (offset >= -0x80000000L && offset <= 0x7fffffffL) {
+					pr_dbg2("found code cave at %#lx (size: %zu)\n",
+						cave_addr, consecutive_nops);
+					return cave_addr;
+				}
+			}
+		} else {
+			consecutive_nops = 0;
+		}
+	}
+
+	pr_dbg3("no suitable code cave found\n");
+	return 0;
+}
+
+
 static int patch_fentry_code(struct mcount_dynamic_info *mdi, struct uftrace_symbol *sym)
 {
 	unsigned char *insn = (void *)sym->addr + mdi->map->start;
@@ -495,6 +623,18 @@ static int patch_normal_func(struct mcount_dynamic_info *mdi, struct uftrace_sym
 	if (state != INSTRUMENT_SUCCESS) {
 		pr_dbg3("  >> %s: %s\n", state == INSTRUMENT_FAILED ? "FAIL" : "SKIP", sym->name);
 		return state;
+	}
+
+	/*
+	 * Try inline 16-byte trampoline for large prologues.
+	 * This is more efficient as it doesn't require saving/restoring
+	 * original instructions to a separate location.
+	 */
+	if (info.orig_size >= INLINE_TRAMPOLINE_SIZE && !info.has_jump) {
+		int ret = patch_inline_trampoline(mdi, &info);
+		if (ret > 0)
+			return INSTRUMENT_SUCCESS;
+		/* Fall through to standard patching if inline trampoline failed */
 	}
 
 	pr_dbg2("force patch normal func: %s (patch size: %d)\n", sym->name, info.orig_size);

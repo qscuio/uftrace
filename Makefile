@@ -195,7 +195,7 @@ SYMBOLS_SRCS += $(srcdir)/utils/demangle.c $(srcdir)/utils/rbtree.c
 SYMBOLS_SRCS += $(srcdir)/utils/utils.c $(srcdir)/utils/debug.c
 SYMBOLS_SRCS += $(srcdir)/utils/filter.c $(srcdir)/utils/dwarf.c
 SYMBOLS_SRCS += $(srcdir)/utils/auto-args.c $(srcdir)/utils/regs.c
-SYMBOLS_SRCS += $(srcdir)/utils/argspec.c
+SYMBOLS_SRCS += $(srcdir)/utils/argspec.c $(srcdir)/utils/eh-frame.c
 SYMBOLS_SRCS += $(srcdir)/arch/$(ARCH)/common.c
 SYMBOLS_SRCS += $(wildcard $(srcdir)/utils/symbol*.c)
 SYMBOLS_OBJS := $(patsubst $(srcdir)/%.c,$(objdir)/%.o,$(SYMBOLS_SRCS))
@@ -205,7 +205,7 @@ DBGINFO_SRCS += $(srcdir)/utils/auto-args.c $(srcdir)/utils/regs.c
 DBGINFO_SRCS += $(srcdir)/utils/utils.c $(srcdir)/utils/debug.c
 DBGINFO_SRCS += $(srcdir)/utils/argspec.c $(srcdir)/utils/rbtree.c
 DBGINFO_SRCS += $(srcdir)/utils/demangle.c $(srcdir)/utils/filter.c
-DBGINFO_SRCS += $(srcdir)/arch/$(ARCH)/common.c
+DBGINFO_SRCS += $(srcdir)/arch/$(ARCH)/common.c $(srcdir)/utils/eh-frame.c
 DBGINFO_SRCS += $(wildcard $(srcdir)/utils/symbol*.c)
 DBGINFO_OBJS := $(patsubst $(srcdir)/%.c,$(objdir)/%.o,$(DBGINFO_SRCS))
 
@@ -235,7 +235,7 @@ LIBMCOUNT_UTILS_SRCS += $(srcdir)/utils/script.c $(srcdir)/utils/script-python.c
 LIBMCOUNT_UTILS_SRCS += $(srcdir)/utils/auto-args.c $(srcdir)/utils/dwarf.c
 LIBMCOUNT_UTILS_SRCS += $(srcdir)/utils/hashmap.c $(srcdir)/utils/argspec.c
 LIBMCOUNT_UTILS_SRCS += $(srcdir)/utils/tracefs.c $(srcdir)/utils/socket.c
-LIBMCOUNT_UTILS_SRCS += $(srcdir)/utils/shmem.c
+LIBMCOUNT_UTILS_SRCS += $(srcdir)/utils/shmem.c $(srcdir)/utils/eh-frame.c
 LIBMCOUNT_UTILS_SRCS += $(wildcard $(srcdir)/utils/symbol*.c)
 LIBMCOUNT_UTILS_OBJS := $(patsubst $(srcdir)/utils/%.c,$(objdir)/libmcount/%.op,$(LIBMCOUNT_UTILS_SRCS))
 
