@@ -125,6 +125,9 @@ __used static const char uftrace_usage[] =
 "   graph           Show function call graph in the trace data\n"
 "   script          Run a script for recorded trace data\n"
 "   tui             Show text user interface for graph and report\n"
+"   attach          Attach to a running process\n"
+"   stream          Run a program and print trace output in real-time\n"
+"   inject          Inject a library to a running process\n"
 "\n";
 
 __used static const char uftrace_help[] =

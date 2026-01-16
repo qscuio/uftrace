@@ -423,9 +423,8 @@ static void setup_attach_environ(struct uftrace_opts *opts, pid_t pid)
 	if (opts->patt_type != PATT_REGEX)
 		setenv("UFTRACE_PATTERN", get_filter_pattern(opts->patt_type), 1);
 
-	/* Disable PLT hooking for attached processes */
-	/* (PLT entries are already resolved) */
-	setenv("UFTRACE_PLTHOOK", "0", 1);
+	/* Enable PLT hooking for attached processes - library call tracing */
+	setenv("UFTRACE_PLTHOOK", "1", 1);
 }
 
 static void setup_attach_cfg(pid_t pid, struct uftrace_opts *opts)

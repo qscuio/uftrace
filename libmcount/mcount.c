@@ -2118,6 +2118,7 @@ static void *mcount_attached_init_thread(void *arg)
 	char *maxstack_str = getenv("UFTRACE_MAX_STACK");
 	char *threshold_str = getenv("UFTRACE_THRESHOLD");
 	char *minsize_str = getenv("UFTRACE_MIN_SIZE");
+	char *plthook_str = getenv("UFTRACE_PLTHOOK");
 	enum uftrace_trace_type trace_type;
 
 	(void)arg;
@@ -2127,6 +2128,12 @@ static void *mcount_attached_init_thread(void *arg)
 	load_proc_maps_attached(&mcount_sym_info);
 
 	load_module_symtabs(&mcount_sym_info);
+
+	/* Enable PLT hooking for library call tracing in attached mode */
+	if (plthook_str && *plthook_str != '0') {
+		pr_dbg("attached mode: setting up PLT hooking for library calls\n");
+		mcount_setup_plthook(mcount_exename, false);
+	}
 
 	if (pattern_str)
 		mcount_filter_setting.ptype = parse_filter_pattern(pattern_str);
@@ -2147,9 +2154,7 @@ static void *mcount_attached_init_thread(void *arg)
 	if (trace_type == TRACE_MCOUNT || trace_type == TRACE_FENTRY ||
 	    trace_type == TRACE_CYGPROF) {
 		pr_dbg("attached mode: rebinding trace functions for instrumented binary\n");
-		/* Enable frame pointer heuristics for return tracking in attached mode */
-		// TESTING: mcount_estimate_return = true;
-		mcount_setup_plthook(mcount_exename, false);
+		/* PLT hooking already done above for all attached processes */
 		if (mcount_sym_info.exec_map) {
 			int rebound = mcount_rebind_trace_syms(mcount_exename,
 							       mcount_sym_info.exec_map->start);
