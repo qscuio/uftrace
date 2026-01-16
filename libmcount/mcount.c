@@ -2154,8 +2154,11 @@ static void *mcount_attached_init_thread(void *arg)
 	char *minsize_str = getenv("UFTRACE_MIN_SIZE");
 	char *plthook_str = getenv("UFTRACE_PLTHOOK");
 	enum uftrace_trace_type trace_type;
+	FILE *dbg = fopen("/tmp/uftrace_plt_debug.log", "a");
 
 	(void)arg;
+
+	if (dbg) fprintf(dbg, "[%d] mcount_attached_init_thread started\n", getpid());
 
 	mcount_dynamic_force_pg = false;
 
@@ -2163,11 +2166,19 @@ static void *mcount_attached_init_thread(void *arg)
 
 	load_module_symtabs(&mcount_sym_info);
 
+	if (dbg) fprintf(dbg, "[%d] plthook_str=%s, get_attach_cfg_plthook()=%d\n",
+			 getpid(), plthook_str ? plthook_str : "(null)", get_attach_cfg_plthook());
+
 	/* Enable PLT hooking for library call tracing in attached mode */
 	if ((plthook_str && *plthook_str != '0') || get_attach_cfg_plthook()) {
+		if (dbg) fprintf(dbg, "[%d] PLT hooking enabled, calling mcount_setup_plthook(%s)\n",
+				 getpid(), mcount_exename);
 		pr_dbg("attached mode: setting up PLT hooking for library calls\n");
+		mcount_estimate_return = true;
 		mcount_setup_plthook(mcount_exename, false);
+		if (dbg) fprintf(dbg, "[%d] PLT hooking setup complete\n", getpid());
 	}
+	if (dbg) { fflush(dbg); fclose(dbg); dbg = NULL; }
 
 	if (pattern_str)
 		mcount_filter_setting.ptype = parse_filter_pattern(pattern_str);
