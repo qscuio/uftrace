@@ -431,18 +431,11 @@ static void setup_attach_cfg(pid_t pid, struct uftrace_opts *opts)
 {
 	char cfg_path[PATH_MAX];
 	char pathbuf[PATH_MAX];
-	const char *symdir;
+	const char *symdir = NULL;
 	FILE *fp;
 
 	snprintf(cfg_path, sizeof(cfg_path), ATTACH_CFG_FMT, pid);
 	unlink(cfg_path);
-
-	if (!opts->with_syms)
-		return;
-
-	symdir = opts->with_syms;
-	if (symdir[0] != '/' && realpath(symdir, pathbuf))
-		symdir = pathbuf;
 
 	fp = fopen(cfg_path, "w");
 	if (fp == NULL) {
@@ -450,8 +443,17 @@ static void setup_attach_cfg(pid_t pid, struct uftrace_opts *opts)
 		return;
 	}
 
-	fprintf(fp, "UFTRACE_SYMBOL_DIR=%s\n", symdir);
+	/* Always enable PLT hooking for library call tracing */
 	fprintf(fp, "UFTRACE_PLTHOOK=1\n");
+
+	/* Optionally write symbol directory if specified */
+	if (opts->with_syms) {
+		symdir = opts->with_syms;
+		if (symdir[0] != '/' && realpath(symdir, pathbuf))
+			symdir = pathbuf;
+		fprintf(fp, "UFTRACE_SYMBOL_DIR=%s\n", symdir);
+	}
+
 	fclose(fp);
 }
 
