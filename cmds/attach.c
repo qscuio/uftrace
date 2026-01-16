@@ -451,6 +451,7 @@ static void setup_attach_cfg(pid_t pid, struct uftrace_opts *opts)
 	}
 
 	fprintf(fp, "UFTRACE_SYMBOL_DIR=%s\n", symdir);
+	fprintf(fp, "UFTRACE_PLTHOOK=1\n");
 	fclose(fp);
 }
 

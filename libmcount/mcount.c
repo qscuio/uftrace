@@ -2103,6 +2103,40 @@ static const char *get_attach_cfg_symdir(char *buf, size_t buflen)
 	return NULL;
 }
 
+static bool get_attach_cfg_plthook(void)
+{
+	char path[PATH_MAX];
+	char line[PATH_MAX + 32];
+	FILE *fp;
+	bool ret = false;
+
+	snprintf(path, sizeof(path), ATTACH_CFG_FMT, getpid());
+	fp = fopen(path, "r");
+	if (fp == NULL)
+		return false;
+
+	while (fgets(line, sizeof(line), fp)) {
+		char *eq;
+		char *val;
+
+		eq = strchr(line, '=');
+		if (!eq)
+			continue;
+
+		*eq = '\0';
+		if (strcmp(line, "UFTRACE_PLTHOOK") != 0)
+			continue;
+
+		val = eq + 1;
+		if (*val == '1')
+			ret = true;
+		break;
+	}
+
+	fclose(fp);
+	return ret;
+}
+
 void mcount_try_open_attached_fifo(void)
 {
 	if (!mcount_attached_mode || mcount_pfd >= 0)
@@ -2130,7 +2164,7 @@ static void *mcount_attached_init_thread(void *arg)
 	load_module_symtabs(&mcount_sym_info);
 
 	/* Enable PLT hooking for library call tracing in attached mode */
-	if (plthook_str && *plthook_str != '0') {
+	if ((plthook_str && *plthook_str != '0') || get_attach_cfg_plthook()) {
 		pr_dbg("attached mode: setting up PLT hooking for library calls\n");
 		mcount_setup_plthook(mcount_exename, false);
 	}
